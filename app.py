@@ -24,18 +24,34 @@ if 'generated' not in st.session_state:
     st.session_state.report_text = None
     st.session_state.residents_data = None 
 
+import os
+import matplotlib.font_manager as fm
+import streamlit as st
+
 @st.cache_resource
 def get_chinese_font():
+    # 獲取目前 app.py 所在的資料夾路徑
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
     font_paths = [
-        r'C:\Windows\Fonts\msjh.ttc', r'C:\Windows\Fonts\msjh.ttf',
-        r'C:\Windows\Fonts\simhei.ttf',
-        r'C:\Users\User\AppData\Local\Microsoft\Windows\Fonts\msjh.ttc',
+        # 1. 優先讀取：專案資料夾內的 .ttf 檔 (請確認檔名完全一致)
+        os.path.join(current_dir, 'NotoSansTC-Regular.ttf'),
+        
+        # 2. Windows 本機測試用 (微軟正黑體)
+        r'C:\Windows\Fonts\msjh.ttc',
+        r'C:\Windows\Fonts\msjh.ttf',
+        
+        # 3. Linux 系統預設 (備用)
         '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc'
     ]
+    
     for path in font_paths:
-        if os.path.exists(path): return path
+        if os.path.exists(path): 
+            return path
+            
     return None
 
+# 設定字體屬性
 font_path = get_chinese_font()
 font_prop = fm.FontProperties(fname=font_path) if font_path else fm.FontProperties()
 
@@ -513,4 +529,5 @@ if st.session_state.generated:
     c1.download_button("⬇️ 下載班表圖檔 (.png)", buf_sch.getvalue(), f"schedule_{year}_{month}.png", "image/png")
     buf_stat = io.BytesIO(); st.session_state.fig_stats.savefig(buf_stat, format="png", dpi=200, bbox_inches='tight')
     c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
+
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", st.session_state.report_text, f"report_{year}_{month}.txt", "text/plain")
