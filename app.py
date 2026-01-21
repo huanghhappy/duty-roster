@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import matplotlib
-matplotlib.use('Agg')  # 背景執行
+matplotlib.use('Agg')  # 設定 matplotlib 在背景執行，避免 GUI 錯誤
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.font_manager as fm
@@ -9,26 +9,43 @@ import pandas as pd
 import random
 import datetime
 import io
+import base64  # <--- 這次新增的關鍵套件
 
-# --- 1. 基礎設定 ---
-st.set_page_config(page_title="成大整外住院醫師智能排班系統", layout="wide")
+# --- 1. 基礎設定 (必須放在程式碼最上方) ---
 
-if 'generated' not in st.session_state:
-    st.session_state.generated = False
-    st.session_state.schedule = None
-    st.session_state.stats = None
-    st.session_state.quotas = None
-    st.session_state.mode = None
-    st.session_state.fig_schedule = None
-    st.session_state.fig_stats = None
-    st.session_state.report_text = None
-    st.session_state.residents_data = None 
+# 設定網頁標題、寬度佈局、以及瀏覽器分頁的小圖示
+st.set_page_config(
+    page_title="成大整外住院醫師智能排班系統", 
+    page_icon="logo.png",  # 這會讀取您上傳的 logo.png
+    layout="wide"
+)
 
-import os
-import matplotlib.font_manager as fm
-import streamlit as st
+# --- 2. 手機主畫面 Icon 設定函式 ---
+def setup_app_icon(image_path):
+    """
+    將圖片編碼並注入 HTML header，讓手機(iOS/Android)加入主畫面時能抓到正確圖示
+    """
+    # 檢查圖片是否存在
+    if os.path.exists(image_path):
+        with open(image_path, "rb") as f:
+            # 將圖片轉為 Base64 編碼
+            encoded_image = base64.b64encode(f.read()).decode()
+        
+        # 注入 Apple Touch Icon (iOS) 和一般 Icon 標籤
+        icon_tags = f'''
+        <style>
+            /* 這裡僅注入 link 標籤，不影響頁面外觀 */
+        </style>
+        <link rel="apple-touch-icon" href="data:image/png;base64,{encoded_image}">
+        <link rel="icon" type="image/png" href="data:image/png;base64,{encoded_image}">
+        '''
+        st.markdown(icon_tags, unsafe_allow_html=True)
 
-@st.cache_resource
+# 執行 Icon 設定 (確保 logo.png 已經上傳到 GitHub)
+setup_app_icon("logo.png")
+
+
+# --- 3. 字型設定 (底下接回您原本的程式碼) ---
 def get_chinese_font():
     # 獲取目前 app.py 所在的資料夾路徑
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -531,3 +548,4 @@ if st.session_state.generated:
     c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
 
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", st.session_state.report_text, f"report_{year}_{month}.txt", "text/plain")
+
