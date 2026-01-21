@@ -1,2 +1,5 @@
 # Smart Duty Roster
-成大整形外科住院醫師排班系統
+
+![App Preview](preview.png)
+
+成大整形外科住院醫師智能排班系統
