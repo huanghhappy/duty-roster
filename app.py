@@ -44,6 +44,13 @@ def setup_app_icon(image_path):
 # 執行 Icon 設定 (確保 logo.png 已經上傳到 GitHub)
 setup_app_icon("logo.png")
 
+# --- 補回：初始化 Session State (這段不見了，要補回來) ---
+if 'generated' not in st.session_state:
+    st.session_state.generated = False
+
+if 'result_df' not in st.session_state:
+    st.session_state.result_df = None
+# ----------------------------------------------------
 
 # --- 3. 字型設定 (底下接回您原本的程式碼) ---
 def get_chinese_font():
@@ -548,4 +555,5 @@ if st.session_state.generated:
     c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
 
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", st.session_state.report_text, f"report_{year}_{month}.txt", "text/plain")
+
 
