@@ -20,34 +20,23 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 2. 手機主畫面 Icon 設定函式 (強化版) ---
-def setup_app_icon(image_path):
-    """
-    將圖片編碼並注入 HTML header，讓手機(iOS/Android)加入主畫面時能抓到正確圖示
-    """
-    if os.path.exists(image_path):
-        with open(image_path, "rb") as f:
-            # 將圖片轉為 Base64 編碼
-            encoded_image = base64.b64encode(f.read()).decode()
-        
-        # 注入 Apple Touch Icon (iOS) 和一般 Icon 標籤
-        # 增加多種 size 宣告以適應不同裝置
-        icon_tags = f'''
-        <style>
-            /* Icon Injection */
-        </style>
-        <link rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,{encoded_image}">
-        <link rel="icon" type="image/png" sizes="32x32" href="data:image/png;base64,{encoded_image}">
-        <link rel="icon" type="image/png" sizes="16x16" href="data:image/png;base64,{encoded_image}">
-        <link rel="shortcut icon" href="data:image/png;base64,{encoded_image}">
-        '''
-        st.markdown(icon_tags, unsafe_allow_html=True)
-    else:
-        # 如果找不到檔案，在側邊欄發出警告 (方便除錯)
-        st.sidebar.warning("⚠️ 警告：找不到 logo.png，請確認檔案已上傳至 GitHub 根目錄。")
+# --- 2. 手機主畫面 Icon 設定函式 (網址版) ---
+def setup_app_icon(icon_url):
+    icon_tags = f'''
+    <style>
+        /* Icon Injection */
+    </style>
+    <link rel="apple-touch-icon" href="{icon_url}">
+    <link rel="icon" type="image/png" sizes="192x192" href="{icon_url}">
+    <link rel="shortcut icon" href="{icon_url}">
+    '''
+    st.markdown(icon_tags, unsafe_allow_html=True)
 
-# 執行 Icon 設定
-setup_app_icon("logo.png")
+# ⬇️⬇️⬇️ 請把下面這行引號內的網址，換成您剛剛複製到的那串 ⬇️⬇️⬇️
+my_icon_url = "https://github.com/huanghhappy/duty-roster/blob/main/logo.png?raw=true" 
+
+# 執行設定
+setup_app_icon(my_icon_url)
 
 # 初始化 Session State
 if 'generated' not in st.session_state:
@@ -588,3 +577,4 @@ if st.session_state.generated:
     buf_stat = io.BytesIO(); st.session_state.fig_stats.savefig(buf_stat, format="png", dpi=200, bbox_inches='tight')
     c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", st.session_state.report_text, f"report_{year}_{month}.txt", "text/plain")
+
