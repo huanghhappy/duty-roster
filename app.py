@@ -9,7 +9,7 @@ import pandas as pd
 import random
 import datetime
 import io
-import base64  # <--- 這次新增的關鍵套件
+import base64
 
 # --- 1. 基礎設定 (必須放在程式碼最上方) ---
 
@@ -20,39 +20,43 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 2. 手機主畫面 Icon 設定函式 ---
+# --- 2. 手機主畫面 Icon 設定函式 (強化版) ---
 def setup_app_icon(image_path):
     """
     將圖片編碼並注入 HTML header，讓手機(iOS/Android)加入主畫面時能抓到正確圖示
     """
-    # 檢查圖片是否存在
     if os.path.exists(image_path):
         with open(image_path, "rb") as f:
             # 將圖片轉為 Base64 編碼
             encoded_image = base64.b64encode(f.read()).decode()
         
         # 注入 Apple Touch Icon (iOS) 和一般 Icon 標籤
+        # 增加多種 size 宣告以適應不同裝置
         icon_tags = f'''
         <style>
-            /* 這裡僅注入 link 標籤，不影響頁面外觀 */
+            /* Icon Injection */
         </style>
-        <link rel="apple-touch-icon" href="data:image/png;base64,{encoded_image}">
-        <link rel="icon" type="image/png" href="data:image/png;base64,{encoded_image}">
+        <link rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,{encoded_image}">
+        <link rel="icon" type="image/png" sizes="32x32" href="data:image/png;base64,{encoded_image}">
+        <link rel="icon" type="image/png" sizes="16x16" href="data:image/png;base64,{encoded_image}">
+        <link rel="shortcut icon" href="data:image/png;base64,{encoded_image}">
         '''
         st.markdown(icon_tags, unsafe_allow_html=True)
+    else:
+        # 如果找不到檔案，在側邊欄發出警告 (方便除錯)
+        st.sidebar.warning("⚠️ 警告：找不到 logo.png，請確認檔案已上傳至 GitHub 根目錄。")
 
-# 執行 Icon 設定 (確保 logo.png 已經上傳到 GitHub)
+# 執行 Icon 設定
 setup_app_icon("logo.png")
 
-# --- 補回：初始化 Session State (這段不見了，要補回來) ---
+# 初始化 Session State
 if 'generated' not in st.session_state:
     st.session_state.generated = False
 
 if 'result_df' not in st.session_state:
     st.session_state.result_df = None
-# ----------------------------------------------------
 
-# --- 3. 字型設定 (底下接回您原本的程式碼) ---
+# --- 3. 字型設定 ---
 def get_chinese_font():
     # 獲取目前 app.py 所在的資料夾路徑
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -79,11 +83,52 @@ def get_chinese_font():
 font_path = get_chinese_font()
 font_prop = fm.FontProperties(fname=font_path) if font_path else fm.FontProperties()
 
-# --- 2. 核心排班邏輯 (v26.0 全場景) ---
+# --- 4. 核心排班邏輯 (v26.1 含標準模式修正) ---
+
+def calculate_standard_8_person_shifts(residents_data, num_days):
+    """
+    [新增] 八人標準模式專用計算邏輯
+    原則：
+    1. 嚴格區分一線(R3/4)與二線(R5/6)
+    2. 一線總班數 = 天數 (每天一班)
+    3. 二線總班數 = 天數 (每天一班)
+    4. 剩餘班數(餘數)由資淺者(R3, R5)優先承擔
+    """
+    # 1. 分組並排序 (確保資淺在前，以便優先分配餘數)
+    r3s = sorted([r for r in residents_data if r['rank'] == 'R3'], key=lambda x: x['name'])
+    r4s = sorted([r for r in residents_data if r['rank'] == 'R4'], key=lambda x: x['name'])
+    r5s = sorted([r for r in residents_data if r['rank'] == 'R5'], key=lambda x: x['name'])
+    r6s = sorted([r for r in residents_data if r['rank'] == 'R6'], key=lambda x: x['name'])
+
+    quotas = {r['name']: 0 for r in residents_data}
+
+    # 2. 定義一線與二線的人力池
+    # 順序很重要：[R3, R4] -> 餘數會先給 R3
+    line1_pool = r3s + r4s 
+    # 順序很重要：[R5, R6] -> 餘數會先給 R5
+    line2_pool = r5s + r6s
+
+    def distribute_shifts(pool, total_slots):
+        if not pool: return
+        n = len(pool)
+        base_shifts = total_slots // n  # 基本班數
+        remainder = total_slots % n     # 餘數
+
+        for i, r in enumerate(pool):
+            # 前 remainder 個人多拿一班
+            extra = 1 if i < remainder else 0
+            quotas[r['name']] = base_shifts + extra
+
+    # 3. 執行分配
+    distribute_shifts(line1_pool, num_days) # 一線分配
+    distribute_shifts(line2_pool, num_days) # 二線分配
+
+    return quotas
 
 def calculate_scenario_and_quotas(residents_data, num_days):
     """
-    判斷場景 (A/B/C) 並計算每人配額與雙人班目標。
+    判斷場景並計算配額。
+    新增：判斷是否為標準 8 人模式 (R3/4/5/6 各 2 人)。
     """
     MAX_SHIFTS = 8
     total_slots_needed_for_double = num_days * 2
@@ -93,55 +138,54 @@ def calculate_scenario_and_quotas(residents_data, num_days):
     r4s = [r for r in residents_data if r['rank'] == 'R4']
     r3s = [r for r in residents_data if r['rank'] == 'R3']
     
-    total_supply = len(residents_data) * MAX_SHIFTS
-    quotas = {r['name']: MAX_SHIFTS for r in residents_data}
-    target_double_count = num_days # 預設全雙人
+    # 判斷是否為標準 8 人模式 (Strict Mode)
+    is_standard_8 = (len(r6s)==2 and len(r5s)==2 and len(r4s)==2 and len(r3s)==2)
+    
+    strict_mode = False
+    quotas = {}
+    target_double_count = num_days
     mode = ""
 
-    # 場景 A: 人力充足 (Total Supply >= 60/62)
-    if total_supply >= total_slots_needed_for_double:
-        mode = "Scenario A (Surplus)"
-        # 減班邏輯：R6 -> R5 -> R4 -> R3
-        excess = total_supply - total_slots_needed_for_double
-        reduce_order = r6s + r5s + r4s + r3s
-        
-        while excess > 0:
-            reduced = False
-            for r in reduce_order:
-                name = r['name']
-                if quotas[name] > 7 and excess > 0: # 至少值7班，不能減太多
-                    quotas[name] -= 1
-                    excess -= 1
-                    reduced = True
-            if not reduced: break
-            
-        # 場景 A 強制全雙人
-        target_double_count = num_days
+    if is_standard_8:
+        # --- 標準 8 人模式邏輯 ---
+        mode = "Standard 8-Person (Strict Line Separation)"
+        strict_mode = True # 開啟嚴格分流
+        target_double_count = num_days # 全雙人
+        # 使用專用函數計算 (R3/4 一線, R5/6 二線)
+        quotas = calculate_standard_8_person_shifts(residents_data, num_days)
 
-    # 場景 B/C: 人力不足
     else:
-        mode = "Scenario B/C (Shortage)"
-        # 配額維持每人 8 班，計算數學極限
+        # --- 原有邏輯 (非標準模式) ---
+        total_supply = len(residents_data) * MAX_SHIFTS
+        quotas = {r['name']: MAX_SHIFTS for r in residents_data}
         
-        # 1. 資深職責需求 (每天至少 1 人站 Line 2 或 Single)
-        senior_role_demand = num_days
-        senior_supply = (len(r5s) + len(r6s)) * MAX_SHIFTS
-        
-        # 2. 計算資深缺口 (需 R4 支援的天數)
-        senior_deficit = max(0, senior_role_demand - senior_supply)
-        
-        # 3. 計算 R4 剩餘給一線的人力
-        r4_total = len(r4s) * MAX_SHIFTS
-        r4_for_line1 = max(0, r4_total - senior_deficit)
-        
-        # 4. 計算一線總供給
-        r3_total = len(r3s) * MAX_SHIFTS
-        total_line1_capacity = r3_total + r4_for_line1
-        
-        # 5. 雙人班天數上限
-        target_double_count = min(num_days, total_line1_capacity)
+        if total_supply >= total_slots_needed_for_double:
+            mode = "Scenario A (Surplus)"
+            # 減班邏輯：R6 -> R5 -> R4 -> R3
+            excess = total_supply - total_slots_needed_for_double
+            reduce_order = r6s + r5s + r4s + r3s
+            while excess > 0:
+                reduced = False
+                for r in reduce_order:
+                    name = r['name']
+                    if quotas[name] > 7 and excess > 0:
+                        quotas[name] -= 1
+                        excess -= 1
+                        reduced = True
+                if not reduced: break
+            target_double_count = num_days
+        else:
+            mode = "Scenario B/C (Shortage)"
+            senior_role_demand = num_days
+            senior_supply = (len(r5s) + len(r6s)) * MAX_SHIFTS
+            senior_deficit = max(0, senior_role_demand - senior_supply)
+            r4_total = len(r4s) * MAX_SHIFTS
+            r4_for_line1 = max(0, r4_total - senior_deficit)
+            r3_total = len(r3s) * MAX_SHIFTS
+            total_line1_capacity = r3_total + r4_for_line1
+            target_double_count = min(num_days, total_line1_capacity)
 
-    return quotas, target_double_count, mode
+    return quotas, target_double_count, mode, strict_mode
 
 def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_schedule, custom_holidays):
     
@@ -155,10 +199,9 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
     all_names = [r['name'] for r in residents_data]
     res_dict = {r['name']: r for r in residents_data}
 
-    # 1. 計算場景參數
-    quotas, target_double_count, mode_desc = calculate_scenario_and_quotas(residents_data, num_days)
+    # 1. 計算場景參數 (新增 strict_mode 回傳)
+    quotas, target_double_count, mode_desc, strict_mode = calculate_scenario_and_quotas(residents_data, num_days)
     
-    # 識別 R3/R4 的鎖定 (這些必須是雙人班)
     locked_junior_dates = set()
     for name, locked_days in fixed_shifts.items():
         if res_dict[name]['rank'] in ['R3', 'R4']:
@@ -166,24 +209,20 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
 
     # --- Monte Carlo 模擬 ---
     for attempt in range(10000):
-        schedule = {d: {'line1': None, 'line2': None, 'type': 'single'} for d in dates} # 預設單人，慢慢升級
+        schedule = {d: {'line1': None, 'line2': None, 'type': 'single'} for d in dates}
         res_state = {name: {'count': 0, 'dates': [], 'weekend_count': 0, 'single_count': 0, 'flap_count': 0} for name in all_names}
         possible = True
         
-        # 2. 分配雙人班名額 (Quota Allocation)
-        # 優先級：Junior鎖定 > Flap > 假日 > 平日
-        
+        # 2. 分配雙人班名額
         current_credits = target_double_count
         double_days = set()
         
-        # (1) Junior 鎖定日 (絕對優先)
+        # (1) Junior 鎖定日
         for d in locked_junior_dates:
             if current_credits > 0:
                 double_days.add(d)
                 current_credits -= 1
             else:
-                # 理論上不該發生 Credits 不夠 Junior 鎖定的狀況 (除非鎖太多)
-                # 若發生，仍強制設為雙人 (因為沒人帶 Junior 會出事)，會稍微爆預算
                 double_days.add(d)
 
         # (2) 剩餘名額分配
@@ -196,13 +235,11 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         random.shuffle(pool_weekday)
         
         priority_list = pool_flap + pool_holiday + pool_weekday
-        
         for d in priority_list:
             if current_credits > 0:
                 double_days.add(d)
                 current_credits -= 1
         
-        # 寫入 Schedule Type
         for d in dates:
             if d in double_days: schedule[d]['type'] = 'double'
             else: schedule[d]['type'] = 'single'
@@ -211,7 +248,7 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         
         def is_available(name, day):
             if day in res_dict[name]['unavailable']: return False
-            if (day - 1) in res_state[name]['dates']: return False # No consecutive
+            if (day - 1) in res_state[name]['dates']: return False 
             if (day + 1) in res_state[name]['dates']: return False
             if res_state[name]['count'] >= quotas[name]: return False
             if day in res_state[name]['dates']: return False 
@@ -220,7 +257,7 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         def sort_key(name):
             return (res_state[name]['count'], random.random())
 
-        # Phase 1: 填入指定班 (Fixed)
+        # Phase 1: 填入指定班 (Fixed) - 不受嚴格模式限制，使用者最大
         fixed_items = list(fixed_shifts.items())
         random.shuffle(fixed_items)
         for p_name, p_dates in fixed_items:
@@ -230,46 +267,48 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
                     res_state[p_name]['count'] += 1
                     res_state[p_name]['dates'].append(d)
                     if d in weekend_dates: res_state[p_name]['weekend_count'] += 1
-                    # Flap計數稍後算
                 
                 is_single = (schedule[d]['type'] == 'single')
                 
+                # 指定班填入邏輯
                 if rank == 'R3':
                     schedule[d]['line1'] = p_name
-                    if is_single: schedule[d]['type'] = 'double' # 強制升級
+                    if is_single: schedule[d]['type'] = 'double'
                 elif rank in ['R5', 'R6']:
                     schedule[d]['line2'] = p_name
                 elif rank == 'R4':
-                    # R4 鎖定：單人日填 L2，雙人日填 L1 (優先)
+                    # R4 預設行為
                     if is_single: schedule[d]['line2'] = p_name
                     else:
                         if schedule[d]['line1']: schedule[d]['line2'] = p_name
                         else: schedule[d]['line1'] = p_name
 
-        # Phase 2: 填補 Senior Role (單人 + 雙人Line2)
-        # 優先順序：Flap > 假日 > 平日 (因為單人Flap最痛苦，雙人Flap L2最重要)
+        # Phase 2: 填補 二線 (Line 2)
         senior_slots = []
         for d in dates:
             if schedule[d]['line2'] is None:
-                # 權重計算
                 weight = 0
                 if d in flap_dates: weight += 100
                 if d in weekend_dates: weight += 50
-                if schedule[d]['type'] == 'single': weight += 20 # 單人優先於雙人L2 (為了保證有人)
+                if schedule[d]['type'] == 'single': weight += 20
                 senior_slots.append((d, weight))
         
         senior_slots.sort(key=lambda x: x[1], reverse=True)
         
         for d, w in senior_slots:
-            # 先找 R5/R6 (主力)
-            cands = [s for s in seniors if is_available(s, d)]
+            cands = []
+            if strict_mode:
+                # [嚴格模式] 只有 R5, R6 可以上二線 (Line 2)
+                cands = [s for s in seniors if is_available(s, d)]
+            else:
+                # [普通模式] R5/R6 優先，R4 支援
+                cands = [s for s in seniors if is_available(s, d)]
+                if not cands:
+                    cands = [r for r in r4s if is_available(r, d)]
             
-            # 若沒人，找 R4 (支援)
-            if not cands:
-                cands = [r for r in r4s if is_available(r, d)]
-                # 若是雙人班，需避開 Line 1 是自己的情況 (已擋連值，這裡擋同日)
-                if schedule[d]['line1']:
-                    cands = [c for c in cands if c != schedule[d]['line1']]
+            # 避開同日已排班的人 (理論上 is_available 已擋，但以防萬一)
+            if schedule[d]['line1']:
+                cands = [c for c in cands if c != schedule[d]['line1']]
             
             if cands:
                 cands.sort(key=sort_key)
@@ -278,22 +317,24 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
                 res_state[p]['count'] += 1; res_state[p]['dates'].append(d)
                 if d in weekend_dates: res_state[p]['weekend_count'] += 1
             else:
-                # 在極限模式下，這一步失敗率高，需要 R4 更多支援
                 possible = False; break
         
         if not possible: continue
 
-        # Phase 3: 填補 Junior Role (雙人Line1)
+        # Phase 3: 填補 一線 (Line 1)
         junior_slots = [d for d in dates if schedule[d]['type'] == 'double' and schedule[d]['line1'] is None]
-        # 排序：Flap > 假日 > 平日
         junior_slots.sort(key=lambda x: (0 if x in flap_dates else 1, 0 if x in weekend_dates else 1))
         
         for d in junior_slots:
-            # 優先找 R3
-            pool = r3s + r4s
+            pool = []
+            if strict_mode:
+                # [嚴格模式] 只有 R3, R4 可以上一線 (Line 1)
+                pool = r3s + r4s
+            else:
+                # [普通模式] R3, R4 都可以
+                pool = r3s + r4s
+                
             cands = [j for j in pool if is_available(j, d)]
-            
-            # 避開 L2
             l2 = schedule[d]['line2']
             cands = [c for c in cands if c != l2]
             
@@ -308,7 +349,7 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         
         if not possible: continue
 
-        # 最終統計與檢查 (Stats)
+        # 最終統計與檢查
         for name in all_names:
             res_state[name]['flap_count'] = 0
             res_state[name]['single_count'] = 0
@@ -316,21 +357,16 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         for d in dates:
             info = schedule[d]
             l2 = info['line2']
-            # Flap 統計：僅計算 二線 或 單人 (即 line2 位置)
             if l2 and d in flap_dates:
                 res_state[l2]['flap_count'] += 1
-            # Single 統計
             if info['type'] == 'single' and l2:
                 res_state[l2]['single_count'] += 1
 
-        # 驗收：場景 B/C 允許誤差，場景 A 盡量滿
-        # 這裡只要能跑完流程，且每人班數不要太離譜 (>= quotas - 2) 就回傳
-        # 剩下的交給人為微調
         return schedule, res_state, mode_desc, quotas
 
     return None, None, None, None
 
-# --- 3. 生成報告與圖表 ---
+# --- 5. 生成報告與圖表 ---
 
 def generate_logic_report(year, month, schedule, stats, mode, quotas, residents_data, flap_dates, weekend_dates):
     lines = []
@@ -340,26 +376,22 @@ def generate_logic_report(year, month, schedule, stats, mode, quotas, residents_
     single_count = sum(1 for d in schedule if schedule[d]['type'] == 'single')
     
     lines.append(f"1. 判斷場景：{mode}")
-    lines.append(f"   - 雙人班名額分配順序：指定值班 > Flap > 假日 > 平日。")
-    if single_count > 0:
+    if "Standard 8-Person" in mode:
+        lines.append(f"   - 啟動【8人標準模式】：嚴格執行職級分流。")
+        lines.append(f"   - 一線班(Line 1)：僅由 R3、R4 擔任。")
+        lines.append(f"   - 二線班(Line 2)：僅由 R5、R6 擔任。")
+        lines.append(f"   - 班數分配：資淺者(R3, R5)優先承擔剩餘班數(例如30天=R6七班+R5八班)。")
+    elif single_count > 0:
         lines.append(f"   - 因人力結構限制，本月安排 {single_count} 天單人值班。")
         lines.append(f"   - 單人班已依照痛苦程度 (Flap單人 > 假日單人 > 平日單人) 盡量避免高痛點。")
     else:
         lines.append(f"   - 人力充足，全月雙人值班。")
     
-    l4_count = 0 
-    r4_names = [r['name'] for r in residents_data if r['rank'] == 'R4']
-    for d, info in schedule.items():
-        if info['type'] == 'single' and info['line2'] in r4_names:
-            l4_count += 1
-
-    if l4_count > 0: lines.append(f"   - ⚠️ R4 支援：R4 支援單人值班共 {l4_count} 天 (填補資深缺口)。")
-
     lines.append(f"\n2. 醫師目標班數：")
     for r in residents_data:
         lines.append(f"   - {r['name']}: 目標 {quotas[r['name']]} 班 | 實際 {stats[r['name']]['count']} 班")
     
-    lines.append(f"\n4. 公平性數據 (Flap班僅統計二線/單人)：")
+    lines.append(f"\n3. 公平性數據 (Flap班僅統計二線/單人)：")
     lines.append(f"   {'醫師':<6} {'總班':<4} {'假日':<4} {'單人':<4} {'Flap':<4}")
     lines.append("-" * 40)
     for r in residents_data:
@@ -439,8 +471,10 @@ def plot_schedule(year, month, schedule, flap_dates, weekend_dates, vs_schedule,
             current_day += 1
             
     title_text = f'{year}年 {month}月 住院醫師班表'
-    if "Scenario A" in mode: title_text += " (標準模式)"
-    else: title_text += " (缺工生存模式)"
+    if "Standard" in mode: title_text += " (標準模式)"
+    elif "Scenario A" in mode: title_text += " (人力充足)"
+    else: title_text += " (缺工模式)"
+    
     ax.text(3.5, 6.2, title_text, ha='center', va='center', fontsize=18, fontweight='bold', color=c_text, fontproperties=font_prop)
 
     legend_y = -0.6
@@ -471,7 +505,7 @@ def plot_stats_table(stats, quotas, residents_data, font_prop):
     plt.title("公平性詳細數據統計", fontproperties=font_prop, fontsize=16, pad=20)
     return fig
 
-# --- 4. Streamlit UI ---
+# --- 6. Streamlit UI ---
 st.title("🏥 成大整外住院醫師智能排班系統")
 st.markdown("---")
 col_a, col_b = st.columns([1, 2])
@@ -553,7 +587,4 @@ if st.session_state.generated:
     c1.download_button("⬇️ 下載班表圖檔 (.png)", buf_sch.getvalue(), f"schedule_{year}_{month}.png", "image/png")
     buf_stat = io.BytesIO(); st.session_state.fig_stats.savefig(buf_stat, format="png", dpi=200, bbox_inches='tight')
     c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
-
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", st.session_state.report_text, f"report_{year}_{month}.txt", "text/plain")
-
-
