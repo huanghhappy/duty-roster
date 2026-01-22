@@ -190,24 +190,26 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
     all_names = [r['name'] for r in residents_data]
     res_dict = {r['name']: r for r in residents_data}
     
-    # 判斷是否為極限缺工模式 (總人數 <= 6 且 R3人數 <= 2)
+    # 判斷是否為極限缺工模式 (總人數 <= 6)
     is_extreme_mode = (len(residents_data) <= 6)
 
     # 1. 計算場景參數
     quotas, target_double_count, mode_desc, strict_mode = calculate_scenario_and_quotas(residents_data, num_days)
     
-    # 極限模式強制修正：雙人班上限 = R3總班數 + R4剩餘給一線的班數
+    # 極限模式強制修正：計算一線最大容量
     if is_extreme_mode:
         r3_shifts = len(r3s) * 8
         r4_shifts = len(r4s) * 8
         senior_demand = num_days
         senior_supply = len(seniors) * 8
-        # R4 需支援二線的班數
+        
+        # R4 必須支援二線的天數 (Gap)
         r4_support_line2 = max(0, senior_demand - senior_supply) 
-        # R4 剩餘給一線的班數
+        
+        # R4 剩下給一線的班數
         r4_for_line1 = max(0, r4_shifts - r4_support_line2)
         
-        # 真正的雙人班額度 (Token)
+        # 真正的雙人班額度 (Token) = R3全上 + R4剩餘
         real_double_credits = r3_shifts + r4_for_line1
         target_double_count = min(num_days, real_double_credits)
 
@@ -217,7 +219,7 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
             for d in locked_days: locked_junior_dates.add(d)
 
     # --- Monte Carlo 模擬 ---
-    for attempt in range(10000):
+    for attempt in range(20000): # 提高嘗試次數
         schedule = {d: {'line1': None, 'line2': None, 'type': 'single'} for d in dates}
         res_state = {name: {'count': 0, 'dates': [], 'weekend_count': 0, 'single_count': 0, 'flap_count': 0} for name in all_names}
         possible = True
@@ -226,15 +228,12 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         current_credits = target_double_count
         double_days = set()
         
-        # (1) Junior 鎖定日 (絕對優先)
+        # (1) Junior 鎖定日
         for d in locked_junior_dates:
-            if current_credits > 0:
-                double_days.add(d)
-                current_credits -= 1
-            else:
-                double_days.add(d) # 即使沒額度也要鎖，會導致 R3 爆班，但為了合規必須這樣
+            double_days.add(d)
+            if current_credits > 0: current_credits -= 1
 
-        # (2) 剩餘名額分配邏輯 (極限模式優化)
+        # (2) 剩餘名額分配
         pool_flap = [d for d in dates if d in flap_dates and d not in double_days]
         pool_holiday = [d for d in dates if d in weekend_dates and d not in flap_dates and d not in double_days]
         pool_weekday = [d for d in dates if d not in flap_dates and d not in weekend_dates and d not in double_days]
@@ -243,13 +242,12 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         random.shuffle(pool_holiday)
         random.shuffle(pool_weekday)
         
-        # [關鍵修正] 極限模式下，Flap 優先權 > 假日
-        # 這樣一線人力會優先保住 Flap 日變成雙人，假日若沒人就變成單人(深粉色)
+        # [策略修正] 極限模式下：Flap日 絕對優先獲得雙人班資格 (讓 R3 去救 Flap)
+        # 剩下的 Credits 才給假日。若假日沒 Credits，就變單人假日(Line 2 only)
         priority_list = []
         if is_extreme_mode:
             priority_list = pool_flap + pool_holiday + pool_weekday
         else:
-            # 一般模式，假日優先度略高或混合，這裡維持原本邏輯
             priority_list = pool_flap + pool_holiday + pool_weekday
             
         for d in priority_list:
@@ -257,7 +255,6 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
                 double_days.add(d)
                 current_credits -= 1
         
-        # 標記型態
         for d in dates:
             if d in double_days: schedule[d]['type'] = 'double'
             else: schedule[d]['type'] = 'single'
@@ -272,27 +269,8 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
             if day in res_state[name]['dates']: return False 
             return True
         
-        # [動態排序權重]
-        def get_sort_key(name, day):
-            # 基礎分數：班數越少越優先
-            score = res_state[name]['count']
-            
-            # 極限模式下的特殊策略
-            if is_extreme_mode:
-                rank = res_dict[name]['rank']
-                is_weekend = day in weekend_dates
-                is_flap = day in flap_dates
-                
-                # 策略 A: R4 優先去填假日 (Line 2)，把 R5/R6 留給平日 Flap
-                if rank == 'R4' and is_weekend:
-                    score -= 5 # 大幅提升 R4 在假日的優先度
-                
-                # 策略 B: R5/R6 優先去填 Flap
-                if rank in ['R5', 'R6'] and is_flap:
-                    score -= 3
-            
-            # 加入隨機擾動避免死板
-            return (score, random.random())
+        def sort_key(name):
+            return (res_state[name]['count'], random.random())
 
         # Phase 1: 填入指定班 (Fixed)
         fixed_items = list(fixed_shifts.items())
@@ -319,33 +297,70 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
                         else: schedule[d]['line1'] = p_name
 
         # Phase 2: 填補 二線 (Line 2) - Senior Role
+        # [關鍵修正] 這裡不依照日期填，而是依照「任務類型」填
+        # 順序：
+        #   1. 極限模式下的假日 -> 強制找 R4 (把 R5/R6 留給平日 Flap)
+        #   2. Flap 日 -> 找 R5/R6
+        #   3. 其他日 -> 混和
+        
         senior_slots = []
         for d in dates:
             if schedule[d]['line2'] is None:
-                weight = 0
-                if d in flap_dates: weight += 100
-                if d in weekend_dates: weight += 50
-                if schedule[d]['type'] == 'single': weight += 20
-                senior_slots.append((d, weight))
+                is_flap = d in flap_dates
+                is_weekend = d in weekend_dates
+                
+                # 定義填班優先級 (分數越高越先填)
+                priority = 0
+                if is_extreme_mode:
+                    if is_weekend: priority = 200 # 假日最優先填 (鎖 R4)
+                    elif is_flap: priority = 100  # Flap 次之
+                    else: priority = 10
+                else:
+                    # 一般模式維持原樣
+                    if is_flap: priority = 100
+                    elif is_weekend: priority = 50
+                    else: priority = 10
+                    
+                senior_slots.append((d, priority))
         
         senior_slots.sort(key=lambda x: x[1], reverse=True)
         
-        for d, w in senior_slots:
+        for d, prio in senior_slots:
+            is_weekend = d in weekend_dates
+            
             cands = []
-            if strict_mode:
+            if strict_mode and not is_extreme_mode:
                 cands = [s for s in seniors if is_available(s, d)]
             else:
-                cands = [s for s in seniors if is_available(s, d)]
-                if not cands:
-                    cands = [r for r in r4s if is_available(r, d)]
+                # [極限模式策略]
+                # 如果是假日(高優先級)，候選人順序：R4 > Seniors
+                if is_extreme_mode and is_weekend:
+                    r4_cands = [r for r in r4s if is_available(r, d)]
+                    senior_cands = [s for s in seniors if is_available(s, d)]
+                    # 優先用 R4，沒有才用 Senior
+                    cands = r4_cands + senior_cands
+                else:
+                    # 平日或 Flap，候選人順序：Seniors > R4
+                    senior_cands = [s for s in seniors if is_available(s, d)]
+                    r4_cands = [r for r in r4s if is_available(r, d)]
+                    cands = senior_cands + r4_cands
             
+            # 避開已在 Line 1 的人
             if schedule[d]['line1']:
                 cands = [c for c in cands if c != schedule[d]['line1']]
             
             if cands:
-                # 使用新的排序邏輯
-                cands.sort(key=lambda n: get_sort_key(n, d))
-                p = cands[0]
+                # 如果有多個 R4 或 多個 Senior，內部再依照班數排序
+                # 這裡簡單用取第一個即可，因為 list 順序已經決定了階級優先權
+                # 但為了平均，我們還是對「同階級」的人做個 sort
+                best_cand = cands[0]
+                
+                # 優化：如果前幾個候選人都是同一階級 (例如都是 R4)，則選班數少的
+                # 簡單作法：找出所有 rank 跟 best_cand 一樣的，然後 sort
+                same_rank_cands = [c for c in cands if res_dict[c]['rank'] == res_dict[best_cand]['rank']]
+                same_rank_cands.sort(key=sort_key)
+                p = same_rank_cands[0]
+
                 schedule[d]['line2'] = p
                 res_state[p]['count'] += 1; res_state[p]['dates'].append(d)
                 if d in weekend_dates: res_state[p]['weekend_count'] += 1
@@ -356,24 +371,19 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
 
         # Phase 3: 填補 一線 (Line 1) - Junior Role
         junior_slots = [d for d in dates if schedule[d]['type'] == 'double' and schedule[d]['line1'] is None]
-        
-        # [關鍵修正] 填補順序：Flap 優先 > 假日
-        # 這確保有限的 R3 資源優先救 Flap 日
+        # 填補順序：Flap 優先 (救命) > 假日
         junior_slots.sort(key=lambda x: (0 if x in flap_dates else 1, 0 if x in weekend_dates else 1))
         
         for d in junior_slots:
-            pool = []
-            if strict_mode:
-                pool = r3s + r4s
-            else:
-                pool = r3s + r4s
-                
+            pool = r3s + r4s
             cands = [j for j in pool if is_available(j, d)]
+            
+            # 避開 Line 2
             l2 = schedule[d]['line2']
             cands = [c for c in cands if c != l2]
             
             if cands:
-                cands.sort(key=lambda n: get_sort_key(n, d))
+                cands.sort(key=sort_key)
                 p = cands[0]
                 schedule[d]['line1'] = p
                 res_state[p]['count'] += 1; res_state[p]['dates'].append(d)
@@ -627,6 +637,7 @@ if st.session_state.generated:
     buf_stat = io.BytesIO(); st.session_state.fig_stats.savefig(buf_stat, format="png", dpi=200, bbox_inches='tight')
     c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", st.session_state.report_text, f"report_{year}_{month}.txt", "text/plain")
+
 
 
 
