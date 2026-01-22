@@ -195,7 +195,11 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
     # 1. 計算場景參數
     quotas, target_double_count, mode_desc, strict_mode = calculate_scenario_and_quotas(residents_data, num_days)
     
-    # 極限模式修正：計算理論最大雙人班數
+    # 極限模式：允許 Quota 彈性 +1 以確保生成成功，後續再用微調修回來
+    if is_extreme_mode:
+        for name in quotas: quotas[name] += 1 
+
+    # 計算 Credits
     if is_extreme_mode:
         r3_shifts = len(r3s) * 8
         r4_shifts = len(r4s) * 8
@@ -204,7 +208,6 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         r4_support_line2 = max(0, senior_demand - senior_supply) 
         r4_for_line1 = max(0, r4_shifts - r4_support_line2)
         real_double_credits = r3_shifts + r4_for_line1
-        # 這裡不強求填滿，保留彈性
         target_double_count = min(num_days, real_double_credits)
 
     locked_junior_dates = set()
@@ -213,23 +216,19 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
             for d in locked_days: locked_junior_dates.add(d)
 
     # --- Monte Carlo 模擬 ---
-    # 提高嘗試次數，因為極限模式可行解很少
-    for attempt in range(20000):
-        schedule = {d: {'line1': None, 'line2': None, 'type': 'single'} for d in dates}
+    for attempt in range(5000):
+        schedule = {d: {'line1': None, 'line2': None, 'type': 'single', 'warning': ''} for d in dates}
         res_state = {name: {'count': 0, 'dates': [], 'weekend_count': 0, 'single_count': 0, 'flap_count': 0} for name in all_names}
         possible = True
         
-        # 2. 分配雙人班名額 (Token Allocation)
+        # 2. 分配雙人班名額
         current_credits = target_double_count
         double_days = set()
         
-        # (1) Junior 鎖定日
         for d in locked_junior_dates:
             double_days.add(d)
             if current_credits > 0: current_credits -= 1
 
-        # (2) 剩餘名額分配 - 極限模式策略
-        # 優先順序：Flap > 假日 > 平日
         pool_flap = [d for d in dates if d in flap_dates and d not in double_days]
         pool_holiday = [d for d in dates if d in weekend_dates and d not in flap_dates and d not in double_days]
         pool_weekday = [d for d in dates if d not in flap_dates and d not in weekend_dates and d not in double_days]
@@ -238,8 +237,7 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         random.shuffle(pool_holiday)
         random.shuffle(pool_weekday)
         
-        priority_list = pool_flap + pool_holiday + pool_weekday
-            
+        priority_list = pool_flap + pool_holiday + pool_weekday    
         for d in priority_list:
             if current_credits > 0:
                 double_days.add(d)
@@ -249,20 +247,17 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
             if d in double_days: schedule[d]['type'] = 'double'
             else: schedule[d]['type'] = 'single'
 
-        # 3. 填入邏輯 (Pipeline)
-        
-        def is_available(name, day):
+        # --- Helper: Check Availability ---
+        def is_available(name, day, strict_consecutive=True, strict_quota=True):
             if day in res_dict[name]['unavailable']: return False
-            if (day - 1) in res_state[name]['dates']: return False 
-            if (day + 1) in res_state[name]['dates']: return False
-            if res_state[name]['count'] >= quotas[name]: return False
             if day in res_state[name]['dates']: return False 
+            if strict_quota and res_state[name]['count'] >= quotas[name]: return False
+            if strict_consecutive:
+                if (day - 1) in res_state[name]['dates']: return False 
+                if (day + 1) in res_state[name]['dates']: return False
             return True
-        
-        def sort_key(name):
-            return (res_state[name]['count'], random.random())
 
-        # Phase 1: 填入指定班 (Fixed)
+        # Phase 1: Fixed Shifts
         fixed_items = list(fixed_shifts.items())
         random.shuffle(fixed_items)
         for p_name, p_dates in fixed_items:
@@ -274,7 +269,6 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
                     if d in weekend_dates: res_state[p_name]['weekend_count'] += 1
                 
                 is_single = (schedule[d]['type'] == 'single')
-                
                 if rank == 'R3':
                     schedule[d]['line1'] = p_name
                     if is_single: schedule[d]['type'] = 'double'
@@ -286,8 +280,7 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
                         if schedule[d]['line1']: schedule[d]['line2'] = p_name
                         else: schedule[d]['line1'] = p_name
 
-        # Phase 2: 填補 二線 (Line 2)
-        # [極限模式策略] 假日強制鎖定 R4
+        # Phase 2: Fill Line 2 (Senior Role)
         senior_slots = []
         for d in dates:
             if schedule[d]['line2'] is None:
@@ -295,8 +288,8 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
                 is_weekend = d in weekend_dates
                 priority = 0
                 if is_extreme_mode:
-                    if is_weekend: priority = 200 # 假日最優先
-                    elif is_flap: priority = 100  # Flap 次之
+                    if is_weekend: priority = 200 
+                    elif is_flap: priority = 100
                     else: priority = 10
                 else:
                     if is_flap: priority = 100
@@ -307,64 +300,158 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         senior_slots.sort(key=lambda x: x[1], reverse=True)
         
         for d, prio in senior_slots:
-            is_weekend = d in weekend_dates
-            cands = []
+            # Definition of candidates
+            pool = []
+            if strict_mode and not is_extreme_mode: pool = seniors
+            else: pool = seniors + r4s
             
-            # 候選人邏輯
-            if is_extreme_mode and is_weekend:
-                # 假日優先給 R4, 其次 Senior
-                r4_cands = [r for r in r4s if is_available(r, d)]
-                senior_cands = [s for s in seniors if is_available(s, d)]
-                cands = r4_cands + senior_cands
-            else:
-                # 平日/Flap 優先給 Senior, 其次 R4
-                senior_cands = [s for s in seniors if is_available(s, d)]
-                r4_cands = [r for r in r4s if is_available(r, d)]
-                cands = senior_cands + r4_cands
-            
-            if schedule[d]['line1']:
-                cands = [c for c in cands if c != schedule[d]['line1']]
-            
+            l1 = schedule[d]['line1']
+            current_pool = [p for p in pool if p != l1]
+
+            # Survival Protocol
+            cands = [p for p in current_pool if is_available(p, d, True, True)]
+            if not cands:
+                cands = [p for p in current_pool if is_available(p, d, False, True)]
+                if cands: schedule[d]['warning'] += '連值 '
+            if not cands:
+                cands = [p for p in current_pool if is_available(p, d, True, False)]
+                if cands: schedule[d]['warning'] += '超班 '
+            if not cands:
+                cands = [p for p in current_pool if is_available(p, d, False, False)]
+                if cands: schedule[d]['warning'] += '連值+超班 '
+
             if cands:
-                # 若候選人包含不同職級，因 list 順序已定，直接取第一個
-                # 若想在同職級內平均，可簡單 sort
-                best_cand = cands[0]
-                schedule[d]['line2'] = best_cand
-                res_state[best_cand]['count'] += 1
-                res_state[best_cand]['dates'].append(d)
-                if d in weekend_dates: res_state[best_cand]['weekend_count'] += 1
+                def get_p2_key(n):
+                    rank = res_dict[n]['rank']
+                    st_score = 10
+                    if is_extreme_mode:
+                        if (d in weekend_dates): st_score = 0 if rank=='R4' else 1
+                        elif (d in flap_dates): st_score = 0 if rank in ['R5','R6'] else 1
+                        else: st_score = 0 if rank in ['R5','R6'] else 1
+                    else: st_score = 0 if rank in ['R5','R6'] else 1
+                    return (st_score, res_state[n]['count'], random.random())
+                
+                cands.sort(key=get_p2_key)
+                best = cands[0]
+                schedule[d]['line2'] = best
+                res_state[best]['count'] += 1
+                res_state[best]['dates'].append(d)
+                if d in weekend_dates: res_state[best]['weekend_count'] += 1
             else:
                 possible = False; break
-        
+
         if not possible: continue
 
-        # Phase 3: 填補 一線 (Line 1)
-        # [關鍵修正：動態降級 Dynamic Downgrade]
-        # 如果一線填不出來，不報錯，直接轉為單人班
-        
+        # Phase 3: Fill Line 1 (Junior Role)
         junior_slots = [d for d in dates if schedule[d]['type'] == 'double' and schedule[d]['line1'] is None]
         junior_slots.sort(key=lambda x: (0 if x in flap_dates else 1, 0 if x in weekend_dates else 1))
         
         for d in junior_slots:
             pool = r3s + r4s
-            cands = [j for j in pool if is_available(j, d)]
-            
-            # 避開已在 Line 2 的人
             l2 = schedule[d]['line2']
-            cands = [c for c in cands if c != l2]
+            current_pool = [p for p in pool if p != l2]
             
+            cands = [p for p in current_pool if is_available(p, d, True, True)]
+            if not cands:
+                cands = [p for p in current_pool if is_available(p, d, False, True)]
+                if cands: schedule[d]['warning'] += 'L1連值 '
+            if not cands:
+                cands = [p for p in current_pool if is_available(p, d, True, False)]
+                 
             if cands:
-                cands.sort(key=sort_key)
-                p = cands[0]
-                schedule[d]['line1'] = p
-                res_state[p]['count'] += 1; res_state[p]['dates'].append(d)
-                if d in weekend_dates: res_state[p]['weekend_count'] += 1
+                cands.sort(key=lambda n: (res_state[n]['count'], random.random()))
+                best = cands[0]
+                schedule[d]['line1'] = best
+                res_state[best]['count'] += 1
+                res_state[best]['dates'].append(d)
+                if d in weekend_dates: res_state[best]['weekend_count'] += 1
             else:
-                # ⚠️ 這裡改動：原本是 possible = False; break
-                # 現在改成：默默地把這天降級為 Single，讓程式繼續跑
                 schedule[d]['type'] = 'single'
-                # (Line 2 已經有人了，所以這天變成合法的單人班)
+                if 'L1連值' in schedule[d]['warning']: schedule[d]['warning'] = schedule[d]['warning'].replace('L1連值', '')
+
+        # ==========================================
+        # Phase 4: 智慧微調 (Smart Rebalancing) - 新增區塊
+        # ==========================================
+        
+        # [Step A: Senior (Over) -> R4 (Under)]
+        # 嘗試把 R5/R6 多出的班，轉移給 R4 (若 R4 還沒滿班)
+        target_shift_per_person = 8 # 理想目標
+        
+        # 找出超班的 Senior 和 缺班的 R4
+        over_seniors = [n for n in seniors if res_state[n]['count'] > target_shift_per_person]
+        under_r4s = [n for n in r4s if res_state[n]['count'] < target_shift_per_person]
+        
+        if over_seniors and under_r4s:
+            # 建立可交換的日期池 (候選日)
+            # 優先順序：Flap日(若R4要扛) > 平日單人 > 平日雙人
+            # 這裡我們專注抓出「平日 Flap」或「平日 Single」
+            swap_candidates = []
+            for d in dates:
+                l2 = schedule[d]['line2']
+                if l2 in over_seniors and d not in weekend_dates:
+                    priority = 0
+                    if d in flap_dates: priority = 10 # 地獄月優先轉移 Flap
+                    elif schedule[d]['type'] == 'single': priority = 5 # 平靜月優先轉移 Single
+                    else: priority = 1
+                    swap_candidates.append((d, l2, priority))
+            
+            swap_candidates.sort(key=lambda x: x[2], reverse=True)
+            
+            for d, senior_name, prio in swap_candidates:
+                # 重新檢查是否有缺班的 R4
+                under_r4s = [n for n in r4s if res_state[n]['count'] < target_shift_per_person]
+                if not under_r4s: break # R4 都飽了，停止
                 
+                # 檢查 R4 當天是否有空 (Strict check)
+                valid_r4 = [r for r in under_r4s if is_available(r, d, True, False) and r != schedule[d]['line1']]
+                
+                if valid_r4 and res_state[senior_name]['count'] > target_shift_per_person:
+                    # 執行交換
+                    r4_name = valid_r4[0]
+                    
+                    # 1. 扣除 Senior
+                    schedule[d]['line2'] = r4_name
+                    res_state[senior_name]['count'] -= 1
+                    res_state[senior_name]['dates'].remove(d)
+                    
+                    # 2. 加入 R4
+                    res_state[r4_name]['count'] += 1
+                    res_state[r4_name]['dates'].append(d)
+                    
+                    # (如果是假日交換，理論上這裡有過濾掉假日，但若邏輯放寬需注意 weekend_count 更新)
+
+        # [Step B: R3 (Under) -> Fill Single Slots]
+        # 嘗試把缺班的 R3 塞進 Single 班，使其升級為 Double
+        under_r3s = [n for n in r3s if res_state[n]['count'] < target_shift_per_person]
+        
+        if under_r3s:
+            # 找出單人班日子
+            single_days = [d for d in dates if schedule[d]['type'] == 'single']
+            # 優先填 Flap 單人 (優先救苦)
+            single_days.sort(key=lambda x: 10 if x in flap_dates else 1, reverse=True)
+            
+            for d in single_days:
+                under_r3s = [n for n in r3s if res_state[n]['count'] < target_shift_per_person]
+                if not under_r3s: break
+                
+                l2 = schedule[d]['line2']
+                # 檢查 R3 是否有空
+                valid_r3 = [r for r in under_r3s if is_available(r, d, True, False) and r != l2]
+                
+                if valid_r3:
+                    r3_name = valid_r3[0]
+                    # 執行填補
+                    schedule[d]['line1'] = r3_name
+                    schedule[d]['type'] = 'double' # 升級！
+                    
+                    res_state[r3_name]['count'] += 1
+                    res_state[r3_name]['dates'].append(d)
+                    if d in weekend_dates: res_state[r3_name]['weekend_count'] += 1
+
+        # ==========================================
+        # End of Phase 4
+        # ==========================================
+
         # 最終統計與檢查
         for name in all_names:
             res_state[name]['flap_count'] = 0
@@ -373,8 +460,12 @@ def run_scheduler(year, month, residents_data, flap_dates, fixed_shifts, vs_sche
         for d in dates:
             info = schedule[d]
             l2 = info['line2']
+            
+            # Flap 統計：只要該日是 Flap 且你是 Line 2 (不論 Senior 或 R4)，都算 Flap 班
             if l2 and d in flap_dates:
                 res_state[l2]['flap_count'] += 1
+            
+            # Single 統計
             if info['type'] == 'single' and l2:
                 res_state[l2]['single_count'] += 1
 
@@ -418,17 +509,22 @@ def generate_logic_report(year, month, schedule, stats, mode, quotas, residents_
     return "\n".join(lines)
 
 def plot_schedule(year, month, schedule, flap_dates, weekend_dates, vs_schedule, font_prop, mode, residents_data):
-    # Colors
-    c_double_flap = '#E8F5E9'     
-    c_double_holiday = '#FFEBEE'  
-    c_double_normal = '#FFFFFF'   
-    c_single_normal = '#FFF9C4'   
-    c_single_holiday = '#F48FB1'  
-    c_single_flap = '#81C784'     
-    c_single_r4 = '#FFB74D'       
+    # Colors Definition
+    c_double_flap = '#E8F5E9'     # 淺綠 (雙人Flap)
+    c_double_holiday = '#FFEBEE'  # 淺粉 (雙人假日)
+    c_double_normal = '#FFFFFF'   # 白 (雙人平日)
+    
+    c_single_normal = '#FFF9C4'   # 淺黃 (單人平日)
+    c_single_holiday = '#F48FB1'  # 深粉 (單人假日)
+    
+    # [關鍵修改色票用途]
+    c_deep_green = '#81C784'      # 深綠 (Flap單人 OR R4扛Flap二線)
+    c_deep_yellow = '#FFB74D'     # 深黃 (R4單人 OR R4扛一般二線)
+    
     c_text = '#424242'
     c_line = '#E0E0E0'
 
+    # 找出所有 R4 的名字
     r4_names = [r['name'] for r in residents_data if r['rank'] == 'R4']
 
     fig, ax = plt.subplots(figsize=(12, 12)) 
@@ -459,30 +555,54 @@ def plot_schedule(year, month, schedule, flap_dates, weekend_dates, vs_schedule,
                 
             x, y_bot = d_idx, 6 - 0.5 - w * row_height - row_height
             info = schedule[current_day]
+            
+            # 狀態判斷
             is_single = (info['type'] == 'single')
             is_flap = current_day in flap_dates
             is_holiday = current_day in weekend_dates
-            name_on_duty = info['line2'] if info['line2'] else info['line1']
-            
-            # R4單人判斷：若是單人班 且 值班者是R4
-            is_r4_solo = is_single and (name_on_duty in r4_names)
-
-            bg_color = c_double_normal 
-            if is_single:
-                if is_r4_solo: bg_color = c_single_r4      
-                elif is_flap: bg_color = c_single_flap    
-                elif is_holiday: bg_color = c_single_holiday 
-                else: bg_color = c_single_normal  
-            else:
-                if is_flap: bg_color = c_double_flap
-                elif is_holiday: bg_color = c_double_holiday
-            
-            ax.add_patch(patches.Rectangle((x, y_bot), 1, row_height, linewidth=1, edgecolor=c_line, facecolor=bg_color))
-            ax.text(x + 0.05, y_bot + row_height - 0.05, str(current_day), ha='left', va='top', fontsize=10, fontweight='bold', color=c_text)
             
             l1, l2 = info['line1'], info['line2']
+            
+            # 找出「二線/主力」是誰 (若是單人班，主力就是那唯一的人；若是雙人班，主力是 l2)
+            # 在前面的邏輯中，單人班的人通常也會填在 l2，但保險起見用 fallback
+            name_on_duty_l2 = l2 if l2 else l1
+            
+            # 判斷 R4 是否擔任二線/主力
+            is_r4_duty = (name_on_duty_l2 in r4_names)
+
+            # --- [核心底色邏輯] ---
+            bg_color = c_double_normal # 預設白
+            
+            if is_r4_duty:
+                # === R4 特殊邏輯 ===
+                if is_flap:
+                    bg_color = c_deep_green  # R4 扛 Flap 二線 -> 深綠
+                else:
+                    bg_color = c_deep_yellow # R4 扛 其他二線 (假日/平日/單人) -> 深黃
+            else:
+                # === 非 R4 (Senior) 一般邏輯 ===
+                if is_single:
+                    if is_flap: bg_color = c_deep_green    # Senior 單人 Flap -> 深綠
+                    elif is_holiday: bg_color = c_single_holiday # Senior 單人 假日 -> 深粉
+                    else: bg_color = c_single_normal       # Senior 單人 平日 -> 淺黃
+                else:
+                    # 雙人班 (Senior 為二線)
+                    if is_flap: bg_color = c_double_flap   # Senior 雙人 Flap -> 淺綠
+                    elif is_holiday: bg_color = c_double_holiday # Senior 雙人 假日 -> 淺粉
+                    else: bg_color = c_double_normal       # Senior 雙人 平日 -> 白
+            
+            # 繪製方塊
+            ax.add_patch(patches.Rectangle((x, y_bot), 1, row_height, linewidth=1, edgecolor=c_line, facecolor=bg_color))
+            
+            # 日期與 Warning 標記
+            day_text = str(current_day)
+            if 'warning' in info and info['warning']:
+                day_text += " (!)"
+            ax.text(x + 0.05, y_bot + row_height - 0.05, day_text, ha='left', va='top', fontsize=10, fontweight='bold', color=c_text)
+            
+            # 填入醫師名字
             if is_single:
-                ax.text(x + 0.5, y_bot + row_height/2, str(l2 if l2 else l1), ha='center', va='center', fontsize=16, color=c_text, fontproperties=font_prop)
+                ax.text(x + 0.5, y_bot + row_height/2, str(name_on_duty_l2), ha='center', va='center', fontsize=16, color=c_text, fontproperties=font_prop)
             else:
                 ax.text(x + 0.5, y_bot + row_height*0.65, str(l1) if l1 else "-", ha='center', va='center', fontsize=14, color=c_text, fontproperties=font_prop)
                 ax.text(x + 0.5, y_bot + row_height*0.25, str(l2) if l2 else "-", ha='center', va='center', fontsize=14, color=c_text, fontproperties=font_prop)
@@ -495,17 +615,33 @@ def plot_schedule(year, month, schedule, flap_dates, weekend_dates, vs_schedule,
     
     ax.text(3.5, 6.2, title_text, ha='center', va='center', fontsize=18, fontweight='bold', color=c_text, fontproperties=font_prop)
 
+    # --- 圖例說明 (Legend) 更新 ---
     legend_y = -0.6
     ax.text(0.5, legend_y, "底色說明：", fontsize=12, fontweight='bold', color=c_text, fontproperties=font_prop)
-    ax.add_patch(patches.Rectangle((1.5, legend_y-0.15), 0.3, 0.3, facecolor=c_double_flap, edgecolor='gray')); ax.text(1.9, legend_y, "Flap雙人", va='center', fontsize=10, fontproperties=font_prop)
-    ax.add_patch(patches.Rectangle((3.0, legend_y-0.15), 0.3, 0.3, facecolor=c_double_holiday, edgecolor='gray')); ax.text(3.4, legend_y, "假日雙人", va='center', fontsize=10, fontproperties=font_prop)
-    ax.add_patch(patches.Rectangle((4.5, legend_y-0.15), 0.3, 0.3, facecolor=c_single_normal, edgecolor='gray')); ax.text(4.9, legend_y, "平日單人", va='center', fontsize=10, fontproperties=font_prop)
-    legend_y2 = -1.0
-    ax.add_patch(patches.Rectangle((1.5, legend_y2-0.15), 0.3, 0.3, facecolor=c_single_flap, edgecolor='gray')); ax.text(1.9, legend_y2, "Flap單人", va='center', fontsize=10, fontproperties=font_prop)
-    ax.add_patch(patches.Rectangle((3.0, legend_y2-0.15), 0.3, 0.3, facecolor=c_single_holiday, edgecolor='gray')); ax.text(3.4, legend_y2, "假日單人", va='center', fontsize=10, fontproperties=font_prop)
     
-    # [修正] 圖例文字改為 R4單人/flap
-    ax.add_patch(patches.Rectangle((4.5, legend_y2-0.15), 0.3, 0.3, facecolor=c_single_r4, edgecolor='gray')); ax.text(4.9, legend_y2, "R4單人/flap", va='center', fontsize=10, fontproperties=font_prop)
+    # 第一排
+    ax.add_patch(patches.Rectangle((1.5, legend_y-0.15), 0.3, 0.3, facecolor=c_double_flap, edgecolor='gray')); 
+    ax.text(1.9, legend_y, "Flap雙人", va='center', fontsize=10, fontproperties=font_prop)
+    
+    ax.add_patch(patches.Rectangle((3.0, legend_y-0.15), 0.3, 0.3, facecolor=c_double_holiday, edgecolor='gray')); 
+    ax.text(3.4, legend_y, "假日雙人", va='center', fontsize=10, fontproperties=font_prop)
+    
+    ax.add_patch(patches.Rectangle((4.5, legend_y-0.15), 0.3, 0.3, facecolor=c_single_normal, edgecolor='gray')); 
+    ax.text(4.9, legend_y, "平日單人", va='center', fontsize=10, fontproperties=font_prop)
+    
+    # 第二排
+    legend_y2 = -1.0
+    
+    # [修改] 深綠色圖例說明
+    ax.add_patch(patches.Rectangle((1.5, legend_y2-0.15), 0.3, 0.3, facecolor=c_deep_green, edgecolor='gray')); 
+    ax.text(1.9, legend_y2, "Flap單人/R4", va='center', fontsize=10, fontproperties=font_prop)
+    
+    ax.add_patch(patches.Rectangle((3.0, legend_y2-0.15), 0.3, 0.3, facecolor=c_single_holiday, edgecolor='gray')); 
+    ax.text(3.4, legend_y2, "假日單人", va='center', fontsize=10, fontproperties=font_prop)
+    
+    # [修改] 深黃色圖例說明
+    ax.add_patch(patches.Rectangle((4.5, legend_y2-0.15), 0.3, 0.3, facecolor=c_deep_yellow, edgecolor='gray')); 
+    ax.text(4.9, legend_y2, "R4單人/二線", va='center', fontsize=10, fontproperties=font_prop)
     
     return fig
 
@@ -609,6 +745,7 @@ if st.session_state.generated:
     buf_stat = io.BytesIO(); st.session_state.fig_stats.savefig(buf_stat, format="png", dpi=200, bbox_inches='tight')
     c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", st.session_state.report_text, f"report_{year}_{month}.txt", "text/plain")
+
 
 
 
