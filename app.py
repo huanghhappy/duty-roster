@@ -33,7 +33,7 @@ def setup_app_icon(icon_url):
     st.markdown(icon_tags, unsafe_allow_html=True)
 
 # ⬇️⬇️⬇️ 請把下面這行引號內的網址，換成您剛剛複製到的那串 ⬇️⬇️⬇️
-my_icon_url = "https://github.com/huanghhappy/duty-roster/blob/main/logo.png?raw=true" 
+my_icon_url = "https://raw.githubusercontent.com/huanghhappy/duty-roster/main/logo.png" 
 
 # 執行設定
 setup_app_icon(my_icon_url)
@@ -577,4 +577,5 @@ if st.session_state.generated:
     buf_stat = io.BytesIO(); st.session_state.fig_stats.savefig(buf_stat, format="png", dpi=200, bbox_inches='tight')
     c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", st.session_state.report_text, f"report_{year}_{month}.txt", "text/plain")
+
 
