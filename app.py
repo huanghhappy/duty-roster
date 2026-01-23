@@ -756,7 +756,7 @@ if st.session_state.generated:
     st.subheader("📊 班表預覽")
     st.pyplot(fig_schedule)
     
-    st.subheader("📈 統計數據")
+    st.subheader("📈 班數統計數據預覽")
     st.pyplot(fig_stats)
     
     # --- 下載區 ---
@@ -772,5 +772,6 @@ if st.session_state.generated:
     c2.download_button("⬇️ 下載班數統計數據 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
     
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", report_text, f"report_{year}_{month}.txt", "text/plain")
+
 
 
