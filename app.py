@@ -648,7 +648,7 @@ if st.button("🚀 生成班表", type="primary"):
 if st.session_state.generated:
     st.markdown("---")
     st.header("✏️ 人工微調編輯器")
-    st.info("💡 使用說明：可直接在下方表格修改「班別」與「值班醫師」。修改後，下方的統計圖表與班表圖檔會**即時自動更新**。")
+    st.info("💡 使用說明：可直接在下方表格修改「班別」與「值班醫師」，修改後可**即時預覽**下方**自動更新**的班表圖檔與班數統計數據。")
     
     # 準備資料給 st.data_editor
     current_schedule = st.session_state.schedule
@@ -769,7 +769,8 @@ if st.session_state.generated:
     
     buf_stat = io.BytesIO()
     fig_stats.savefig(buf_stat, format="png", dpi=200, bbox_inches='tight')
-    c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
+    c2.download_button("⬇️ 下載班數統計數據 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
     
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", report_text, f"report_{year}_{month}.txt", "text/plain")
+
 
