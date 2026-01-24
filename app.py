@@ -642,15 +642,15 @@ if st.button("🚀 生成班表", type="primary"):
             st.error(f"❌ 排班失敗。請確認是否鎖定日期衝突過多。")
 
 # ==========================================
-# 互動式微調 & 結果顯示區
+# 互動式微調 & 結果顯示區 (優化版：自動連動+即時響應)
 # ==========================================
 
 if st.session_state.generated:
     st.markdown("---")
     st.header("✏️ 人工微調編輯器")
-    st.info("💡 使用說明：可直接在下方表格修改「班別」與「值班醫師」，修改後可**即時預覽**下方**自動更新**的班表圖檔與班數統計數據。")
+    st.info("💡 使用說明：可直接在下方表格修改「一線」或「二線」醫師，**「班別」會依據人數自動切換 (單人/雙人)**。修改後圖表將即時更新。")
     
-    # 準備資料給 st.data_editor
+    # 1. 準備資料給 st.data_editor
     current_schedule = st.session_state.schedule
     schedule_data = []
     
@@ -665,68 +665,87 @@ if st.session_state.generated:
         l1 = info['line1'] if info['line1'] else ""
         l2 = info['line2'] if info['line2'] else ""
         
+        # 這裡的「班別」僅作為顯示用，稍後會被自動邏輯覆蓋
         schedule_data.append({
             "日期": d,
             "星期": wd,
-            "班別": "單人" if info['type'] == 'single' else "雙人",
+            "班別": "雙人" if (l1 and l2) else "單人", # 預設依據目前狀態顯示
             "一線 (Line 1)": l1,
             "二線 (Line 2)": l2
         })
     
     df_schedule = pd.DataFrame(schedule_data)
     
-    # 準備下拉選單選項 (包含一個空選項)
+    # 準備下拉選單選項 (包含一個空選項，代表沒人/刪除)
     resident_names = [r['name'] for r in st.session_state.residents_data]
     resident_options = [""] + resident_names
     
-    # 顯示編輯器
+    # 2. 顯示編輯器
     edited_df = st.data_editor(
         df_schedule,
         column_config={
-            "日期": st.column_config.NumberColumn(disabled=True),
-            "星期": st.column_config.TextColumn(disabled=True),
-            "班別": st.column_config.SelectboxColumn("班別", options=["單人", "雙人"], required=True),
-            "一線 (Line 1)": st.column_config.SelectboxColumn("一線 (Line 1)", options=resident_options),
-            "二線 (Line 2)": st.column_config.SelectboxColumn("二線 (Line 2)", options=resident_options),
+            "日期": st.column_config.NumberColumn(disabled=True, width=60),
+            "星期": st.column_config.TextColumn(disabled=True, width=80),
+            "班別": st.column_config.TextColumn(disabled=True, width=80), # 設定為唯讀，由程式自動判斷
+            "一線 (Line 1)": st.column_config.SelectboxColumn("一線 (Line 1)", options=resident_options, width=150),
+            "二線 (Line 2)": st.column_config.SelectboxColumn("二線 (Line 2)", options=resident_options, width=150),
         },
         hide_index=True,
-        use_container_width=True,
+        use_container_width=False,
         key="editor_key" # 給個 Key 確保狀態穩定
     )
     
-    # --- 即時重算邏輯 ---
-    # 當編輯器變動時，edited_df 會改變，這裡將其轉回 schedule 格式並更新 session_state
+    # 3. 處理變更 & 執行自動邏輯 (Auto-Logic)
     new_schedule = {}
+    has_changes = False # 偵測是否有變動
+    
     for index, row in edited_df.iterrows():
         d = row["日期"]
-        t = 'single' if row["班別"] == "單人" else 'double'
         
-        # 處理空字串轉回 None
+        # 讀取使用者選擇的醫師 (空字串轉回 None)
         l1 = row["一線 (Line 1)"] if row["一線 (Line 1)"] != "" else None
         l2 = row["二線 (Line 2)"] if row["二線 (Line 2)"] != "" else None
         
+        # --- [關鍵優化] 自動判斷班別 ---
+        # 邏輯：只要一二線都有人，就是雙人；否則就是單人
+        # 這會自動覆蓋掉舊的 type，實現自動連動
+        calculated_type = 'double' if (l1 and l2) else 'single'
+        
+        # 檢查是否跟原本狀態不同 (用於決定是否 Rerun)
+        original_info = st.session_state.schedule[d]
+        if (original_info['line1'] != l1) or \
+           (original_info['line2'] != l2) or \
+           (original_info['type'] != calculated_type):
+            has_changes = True
+
         new_schedule[d] = {
             'line1': l1,
             'line2': l2,
-            'type': t,
+            'type': calculated_type, # 強制使用自動判斷的結果
             'warning': '' # 手動修改後清除自動生成的 warning
         }
     
-    # 更新 State 中的 schedule
-    st.session_state.schedule = new_schedule
-    
-    # 呼叫重算函式更新 Stats
-    new_stats = recalculate_stats(
-        new_schedule, 
-        st.session_state.residents_data, 
-        st.session_state.flap_input, 
-        st.session_state.holiday_input
-    )
-    st.session_state.stats = new_stats
+    # 4. 如果偵測到變動：更新 State 並強制 Rerun
+    if has_changes:
+        st.session_state.schedule = new_schedule
+        
+        # 重新計算統計數據
+        new_stats = recalculate_stats(
+            new_schedule, 
+            st.session_state.residents_data, 
+            st.session_state.flap_input, 
+            st.session_state.holiday_input
+        )
+        st.session_state.stats = new_stats
+        
+        # [關鍵] 強制重新執行 (Rerun)
+        # 這能解決「點擊兩次才生效」的問題，讓修改瞬間反應到圖表和表格上
+        st.rerun()
 
-    # --- 重新繪圖 (基於修改後的數據) ---
+    # --- 5. 繪圖與下載區 (使用最新的 State 繪製) ---
+    
     fig_schedule = plot_schedule(
-        year, month, new_schedule, 
+        year, month, st.session_state.schedule, 
         st.session_state.flap_input, 
         st.session_state.holiday_input, 
         st.session_state.vs_input, 
@@ -736,30 +755,28 @@ if st.session_state.generated:
     )
     
     fig_stats = plot_stats_table(
-        new_stats, 
+        st.session_state.stats, 
         st.session_state.quotas, 
         st.session_state.residents_data, 
         st.session_state.font_prop
     )
     
     report_text = generate_logic_report(
-        year, month, new_schedule, new_stats, 
+        year, month, st.session_state.schedule, st.session_state.stats, 
         st.session_state.mode, st.session_state.quotas, 
         st.session_state.residents_data, 
         st.session_state.flap_input, 
         st.session_state.holiday_input
     )
 
-    # --- 顯示結果區 ---
-    st.success(f"✅ 當前班表狀態 (模式：{st.session_state.mode}) - 已套用手動修改")
+    st.success(f"✅ 當前班表狀態 (模式：{st.session_state.mode})")
     
     st.subheader("📊 班表預覽")
     st.pyplot(fig_schedule)
     
-    st.subheader("📈 班數統計數據預覽")
+    st.subheader("📈 統計數據")
     st.pyplot(fig_stats)
     
-    # --- 下載區 ---
     st.subheader("📥 匯出檔案")
     c1, c2, c3 = st.columns(3)
     
@@ -769,9 +786,6 @@ if st.session_state.generated:
     
     buf_stat = io.BytesIO()
     fig_stats.savefig(buf_stat, format="png", dpi=200, bbox_inches='tight')
-    c2.download_button("⬇️ 下載班數統計數據 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
+    c2.download_button("⬇️ 下載班數統計圖表 (.png)", buf_stat.getvalue(), f"stats_{year}_{month}.png", "image/png")
     
     c3.download_button("⬇️ 下載智能排班邏輯說明 (.txt)", report_text, f"report_{year}_{month}.txt", "text/plain")
-
-
-
