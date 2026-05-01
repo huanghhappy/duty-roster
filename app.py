@@ -14,7 +14,7 @@ import base64
 # --- 1. 基礎設定 (必須放在程式碼最上方) ---
 
 st.set_page_config(
-    page_title="成大整外住院醫師智能排班系統", 
+    page_title="住院醫師智能排班系統", 
     page_icon="logo.png",
     layout="wide"
 )
@@ -562,7 +562,7 @@ def plot_stats_table(stats, quotas, residents_data, font_prop):
     return fig
 
 # --- 6. Streamlit UI ---
-st.title("🏥 成大整外住院醫師智能排班系統")
+st.title("🏥 住院醫師智能排班系統")
 st.markdown("---")
 col_a, col_b = st.columns([1, 2])
 with col_a:
